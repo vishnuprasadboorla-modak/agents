@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from fastmcp.server.dependencies import get_http_headers
+
 from astro_airflow_mcp.adapters import AirflowAdapter, create_adapter
 from astro_airflow_mcp.astro_pat import AstroPATAuth, AstroPATResolver
 from astro_airflow_mcp.auth import TokenManager
@@ -16,6 +18,18 @@ if TYPE_CHECKING:
     from astro_airflow_mcp.config.models import AuthKind
 
 logger = get_logger(__name__)
+
+
+def _extract_bearer_token() -> str | None:
+    """Return the caller's forwarded Bearer token, or None if there isn't one.
+
+    ``authorization`` must be requested explicitly - FastMCP excludes it by default.
+    """
+    headers = get_http_headers(include={"authorization"})
+    auth = headers.get("authorization", "")
+    if auth.lower().startswith("bearer "):
+        return auth[7:]
+    return None
 
 
 class AdapterManager:
@@ -134,7 +148,14 @@ class AdapterManager:
         self._adapter = None
 
     def _get_auth_token(self) -> str | None:
-        """Get the current authentication token, or None if unconfigured."""
+        """Get the current authentication token, or None if unconfigured.
+
+        A token forwarded on the current request wins over this server's own
+        configured identity, so each caller acts against Airflow as themselves.
+        """
+        forwarded = _extract_bearer_token()
+        if forwarded:
+            return forwarded
         if self._auth_token:
             return self._auth_token
         if self._token_manager:

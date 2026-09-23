@@ -21,6 +21,10 @@ EXPOSE 8000
 ENV AIRFLOW_API_URL=http://localhost:8080
 ENV PYTHONUNBUFFERED=1
 
+# Run as a non-root user rather than the container default of root
+RUN groupadd --system app && useradd --system --gid app --no-create-home app
+USER app
+
 # Default command runs in stdio mode (for MCP clients)
 CMD ["python", "-m", "astro_airflow_mcp"]
 

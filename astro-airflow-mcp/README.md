@@ -20,13 +20,22 @@
     - [Quick Reference](#quick-reference)
     - [Instance Management](#instance-management)
     - [Configuration scopes](#configuration-scopes)
+      - [Migrating from `~/.af/config.yaml`](#migrating-from-afconfigyaml)
     - [Instance Discovery](#instance-discovery)
     - [Direct API Access](#direct-api-access)
+      - [Config file format](#config-file-format)
     - [Configuration](#configuration-1)
     - [Registry Caching](#registry-caching)
   - [Advanced Usage](#advanced-usage)
     - [Running as Standalone Server](#running-as-standalone-server)
+      - [Per-caller authentication (multi-tenant connectors)](#per-caller-authentication-multi-tenant-connectors)
     - [Airflow Plugin Mode](#airflow-plugin-mode)
+      - [Install](#install)
+      - [Environment variables](#environment-variables)
+      - [Connect your MCP client](#connect-your-mcp-client)
+      - [Astro deployments](#astro-deployments)
+      - [Open-source Airflow](#open-source-airflow)
+      - [Airflow 2.x notes](#airflow-2x-notes)
     - [CLI Options](#cli-options)
     - [Telemetry](#telemetry)
   - [Architecture](#architecture)
@@ -567,6 +576,31 @@ AIRFLOW_API_URL=https://my-airflow.example.com AIRFLOW_USERNAME=admin AIRFLOW_PA
 ```
 
 Connect MCP clients to: `http://localhost:8000/mcp`
+
+#### Per-caller authentication (multi-tenant connectors)
+
+Start the server with no `AIRFLOW_AUTH_TOKEN` / `AIRFLOW_USERNAME` / `AIRFLOW_PASSWORD` set and it runs credential-less — it never logs into Airflow on its own. Instead, each MCP client request must carry its own `Authorization: Bearer <token>` header, which is forwarded as-is to Airflow on every tool call:
+
+```bash
+uvx astro-airflow-mcp --transport http --airflow-url https://my-airflow.example.com
+```
+
+```json
+{
+  "mcpServers": {
+    "airflow": {
+      "url": "http://localhost:8000/mcp",
+      "headers": {
+        "Authorization": "Bearer <your-own-airflow-token>"
+      }
+    }
+  }
+}
+```
+
+This is the right mode when one server is shared by multiple users: each caller acts against Airflow as themselves, under their own RBAC role, instead of everyone sharing one admin credential baked into the server's environment. A request with no token, or an invalid one, is rejected by Airflow itself — there's no fallback identity to quietly fall back to.
+
+If `AIRFLOW_AUTH_TOKEN`/`AIRFLOW_USERNAME`/`AIRFLOW_PASSWORD` *are* set, a per-request forwarded token still takes precedence when present; the configured credential only kicks in for callers who send none.
 
 ### Airflow Plugin Mode
 
