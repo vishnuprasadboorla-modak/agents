@@ -55,7 +55,9 @@ mcp = FastMCP(
 )
 
 # Add middleware
-mcp.add_middleware(LoggingMiddleware(include_payloads=True))
+# Never log request/response payloads: tool arguments and results carry
+# per-user data (DAG source, variables, connections, task logs).
+mcp.add_middleware(LoggingMiddleware(include_payloads=False))
 mcp.add_middleware(TelemetryMiddleware())
 
 

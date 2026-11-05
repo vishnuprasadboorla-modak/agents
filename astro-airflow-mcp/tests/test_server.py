@@ -552,3 +552,14 @@ class TestGetAuthToken:
         token = _manager._get_auth_token()
         assert token == "direct_token"
         mock_manager.get_token.assert_not_called()
+
+
+def test_request_payloads_are_never_logged():
+    """Tool args/results carry per-user data; the logging middleware must not dump them."""
+    from fastmcp.server.middleware.logging import LoggingMiddleware
+
+    from astro_airflow_mcp.server import mcp
+
+    logging_mw = [m for m in mcp.middleware if isinstance(m, LoggingMiddleware)]
+    assert logging_mw, "LoggingMiddleware is expected to be installed"
+    assert all(m.include_payloads is False for m in logging_mw)
