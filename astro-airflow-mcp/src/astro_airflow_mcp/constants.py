@@ -16,5 +16,9 @@ DEFAULT_AIRFLOW_URL = "http://localhost:8080"
 # Read-only mode environment variable
 READ_ONLY_ENV_VAR = "AF_READ_ONLY"
 
+# Strict per-user auth: every tool call must carry the caller's own bearer
+# token; never fall back to a server-configured identity.
+REQUIRE_USER_TOKEN_ENV_VAR = "ASTRO_MCP_REQUIRE_USER_TOKEN"
+
 # Tool allowlist environment variable
 ALLOWED_TOOLS_ENV_VAR = "ASTRO_MCP_ALLOWED_TOOLS"

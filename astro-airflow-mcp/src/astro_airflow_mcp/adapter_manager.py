@@ -2,14 +2,16 @@
 
 from __future__ import annotations
 
+import os
 from typing import TYPE_CHECKING
 
 from fastmcp.server.dependencies import get_http_headers
 
 from astro_airflow_mcp.adapters import AirflowAdapter, create_adapter
+from astro_airflow_mcp.adapters.base import MissingUserTokenError
 from astro_airflow_mcp.astro_pat import AstroPATAuth, AstroPATResolver
 from astro_airflow_mcp.auth import TokenManager
-from astro_airflow_mcp.constants import DEFAULT_AIRFLOW_URL
+from astro_airflow_mcp.constants import DEFAULT_AIRFLOW_URL, REQUIRE_USER_TOKEN_ENV_VAR
 from astro_airflow_mcp.logging import get_logger
 
 if TYPE_CHECKING:
@@ -30,6 +32,16 @@ def _extract_bearer_token() -> str | None:
     if auth.lower().startswith("bearer "):
         return auth[7:]
     return None
+
+
+def _require_user_token() -> bool:
+    """True when strict per-user auth is on (ASTRO_MCP_REQUIRE_USER_TOKEN=true).
+
+    Read on every call so it cannot be bypassed by import order. In strict mode
+    the server never authenticates to Airflow as itself: a request without its
+    own bearer token fails instead of falling back to a configured identity.
+    """
+    return os.environ.get(REQUIRE_USER_TOKEN_ENV_VAR, "").strip().lower() == "true"
 
 
 class AdapterManager:
@@ -133,11 +145,14 @@ class AdapterManager:
         """
         if self._adapter is None:
             logger.info("Initializing adapter for %s", self._airflow_url)
+            # Strict mode: drop every server-side identity (Astro PAT handler,
+            # basic-auth fallback) so only the caller's forwarded token is usable.
+            strict = _require_user_token()
             self._adapter = create_adapter(
                 airflow_url=self._airflow_url,
                 token_getter=self._get_auth_token,
-                basic_auth_getter=self._get_basic_auth,
-                auth_handler=self._auth_handler,
+                basic_auth_getter=None if strict else self._get_basic_auth,
+                auth_handler=None if strict else self._auth_handler,
                 verify=self._verify,
             )
             logger.info("Created adapter for Airflow %s", self._adapter.version)
@@ -156,6 +171,8 @@ class AdapterManager:
         forwarded = _extract_bearer_token()
         if forwarded:
             return forwarded
+        if _require_user_token():
+            raise MissingUserTokenError()
         if self._auth_token:
             return self._auth_token
         if self._token_manager:

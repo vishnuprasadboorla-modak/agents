@@ -646,6 +646,12 @@ This is the right mode when one server is shared by multiple users: each caller 
 
 If `AIRFLOW_AUTH_TOKEN`/`AIRFLOW_USERNAME`/`AIRFLOW_PASSWORD` *are* set, a per-request forwarded token still takes precedence when present; the configured credential only kicks in for callers who send none.
 
+**Strict mode (recommended for production).** Set `ASTRO_MCP_REQUIRE_USER_TOKEN=true` to make per-caller auth fail closed. A tool call without its own `Authorization: Bearer` header returns a `MissingUserTokenError` and never reaches Airflow, and the server ignores every credential it was configured with (token, username/password, Astro PAT). Listing tools and the version probe don't need a token, so MCP clients can still connect and discover tools. Only the exact value `true` enables it (case-insensitive).
+
+Because the token is a bearer credential sent in a request header, serve the MCP endpoint over HTTPS in production (for example behind a TLS-terminating reverse proxy), and use an `https://` Airflow URL.
+
+To limit what a connector can do, combine strict mode with `ASTRO_MCP_ALLOWED_TOOLS` (for example, leaving out `list_connections`, `list_variables` and `get_variable`) and, for read-only connectors, `AF_READ_ONLY=true`. Authorization itself stays in Airflow: each user's RBAC role decides what their token may do.
+
 ### Airflow Plugin Mode
 
 Install into your Airflow environment to expose an MCP endpoint directly on the webserver. This lets AI tools connect to your Airflow instance remotely via the MCP protocol — no standalone server needed.

@@ -35,6 +35,16 @@ class NotFoundError(Exception):
         super().__init__(f"Endpoint not found: {endpoint}")
 
 
+class MissingUserTokenError(Exception):
+    """Raised in strict per-user mode when a request carries no bearer token."""
+
+    def __init__(self) -> None:
+        super().__init__(
+            "No Airflow token was provided with this request. This server requires "
+            "each caller to send their own 'Authorization: Bearer <token>' header."
+        )
+
+
 class AirflowAdapter(ABC):
     """Abstract base class for Airflow API adapters.
 

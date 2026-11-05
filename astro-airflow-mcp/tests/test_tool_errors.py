@@ -115,3 +115,25 @@ class TestToolError:
         assert data["dag_id"] == "x"
         assert data["retryable"] is True
         assert data["hint"]
+
+
+class TestUserTokenErrors:
+    def test_missing_user_token_is_not_retryable_and_points_at_the_user(self):
+        from astro_airflow_mcp.adapters.base import MissingUserTokenError
+
+        payload = error_payload(MissingUserTokenError())
+        assert payload["retryable"] is False
+        assert payload["error_type"] == "MissingUserTokenError"
+        assert "restart" not in payload["hint"].lower()
+        assert "token" in payload["hint"].lower()
+
+    @pytest.mark.parametrize("status", [401, 403])
+    def test_auth_status_hint_does_not_tell_agent_to_restart_server(self, status):
+        request = httpx.Request("GET", "https://airflow.test/api/v2/dags")
+        exc = httpx.HTTPStatusError(
+            "denied", request=request, response=httpx.Response(status, request=request)
+        )
+        payload = error_payload(exc)
+        assert payload["retryable"] is False
+        assert "restart" not in payload["hint"].lower()
+        assert "refresh" in payload["hint"].lower()

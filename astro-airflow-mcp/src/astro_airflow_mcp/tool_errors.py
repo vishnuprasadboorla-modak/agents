@@ -30,7 +30,11 @@ from typing import Any
 
 import httpx
 
-from astro_airflow_mcp.adapters.base import NotFoundError, ReadOnlyError
+from astro_airflow_mcp.adapters.base import (
+    MissingUserTokenError,
+    NotFoundError,
+    ReadOnlyError,
+)
 
 try:  # Auth errors live in the astro session module; treat as optional.
     from astro_airflow_mcp._astro_session import AstroPATError
@@ -48,9 +52,11 @@ def _classify_status(exc: httpx.HTTPStatusError) -> tuple[bool, str]:
         )
     if status in (401, 403):
         return False, (
-            f"Not authorized (HTTP {status}). The token may be missing, expired, or "
-            "lack permission for this operation. Re-authenticate and restart the "
-            "MCP server, then try again."
+            f"Not authorized (HTTP {status}). The Airflow token used for this request "
+            "may be missing, expired or invalid, or the user may lack permission for "
+            "this operation. Do not retry the same call; ask the user to refresh "
+            "their Airflow token (for connectors, update the secret) or to request "
+            "access."
         )
     if status == 404:
         return True, (
@@ -80,6 +86,12 @@ def _classify(exc: Exception) -> tuple[bool, str]:
             "The server is running in read-only mode (AF_READ_ONLY=true), so this "
             "write was blocked. Do not retry; ask the operator to disable read-only "
             "mode if the change is intended."
+        )
+    if isinstance(exc, MissingUserTokenError):
+        return False, (
+            "No Airflow token reached the server with this request. Do not retry; "
+            "tell the user their Airflow token is not configured (for connectors, "
+            "the secret is missing) and ask them to set it."
         )
     if isinstance(exc, NotFoundError):
         return True, (

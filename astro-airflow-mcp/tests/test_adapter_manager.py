@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import pytest
+
 from astro_airflow_mcp.adapter_manager import AdapterManager, _extract_bearer_token
+from astro_airflow_mcp.adapters.base import MissingUserTokenError
 from astro_airflow_mcp.astro_pat import AstroPATAuth
 
 
@@ -145,3 +148,74 @@ class TestGetAuthTokenPerRequestForwarding:
         m = AdapterManager()
         mocker.patch("astro_airflow_mcp.adapter_manager._extract_bearer_token", return_value=None)
         assert m._get_auth_token() is None
+
+
+class TestStrictUserTokenMode:
+    """ASTRO_MCP_REQUIRE_USER_TOKEN=true: never authenticate as the server itself."""
+
+    ENV = "ASTRO_MCP_REQUIRE_USER_TOKEN"
+
+    def test_forwarded_token_is_used(self, mocker, monkeypatch):
+        monkeypatch.setenv(self.ENV, "true")
+        m = AdapterManager()
+        mocker.patch(
+            "astro_airflow_mcp.adapter_manager._extract_bearer_token",
+            return_value="caller-own-token",
+        )
+        assert m._get_auth_token() == "caller-own-token"
+
+    def test_missing_token_raises_even_with_static_token_configured(self, mocker, monkeypatch):
+        monkeypatch.setenv(self.ENV, "true")
+        m = AdapterManager()
+        m.configure(url="https://example.com", auth_token="server-configured-token")
+        mocker.patch("astro_airflow_mcp.adapter_manager._extract_bearer_token", return_value=None)
+        with pytest.raises(MissingUserTokenError):
+            m._get_auth_token()
+
+    def test_missing_token_never_calls_token_manager(self, mocker, monkeypatch):
+        monkeypatch.setenv(self.ENV, "true")
+        m = AdapterManager()
+        m.configure(url="https://example.com", username="u", password="p")
+        mocker.patch("astro_airflow_mcp.adapter_manager._extract_bearer_token", return_value=None)
+        get_token = mocker.patch.object(m._token_manager, "get_token")
+        with pytest.raises(MissingUserTokenError):
+            m._get_auth_token()
+        get_token.assert_not_called()
+
+    def test_missing_token_raises_when_fully_unconfigured(self, mocker, monkeypatch):
+        monkeypatch.setenv(self.ENV, "true")
+        mocker.patch("astro_airflow_mcp.adapter_manager._extract_bearer_token", return_value=None)
+        with pytest.raises(MissingUserTokenError):
+            AdapterManager()._get_auth_token()
+
+    def test_adapter_built_without_server_identities(self, mocker, monkeypatch):
+        """Astro PAT handler and basic-auth fallback must not reach the adapter."""
+        monkeypatch.setenv(self.ENV, "true")
+        m = AdapterManager()
+        m.configure(url="https://example.com", auth_kind="astro_pat", astro_context="astronomer.io")
+        assert m._auth_handler is not None  # configured, but must be ignored
+        create = mocker.patch("astro_airflow_mcp.adapter_manager.create_adapter")
+        m.get_adapter()
+        kwargs = create.call_args.kwargs
+        assert kwargs["auth_handler"] is None
+        assert kwargs["basic_auth_getter"] is None
+
+    def test_adapter_keeps_server_identities_when_strict_off(self, mocker, monkeypatch):
+        monkeypatch.delenv(self.ENV, raising=False)
+        m = AdapterManager()
+        m.configure(url="https://example.com", username="u", password="p")
+        create = mocker.patch("astro_airflow_mcp.adapter_manager.create_adapter")
+        m.get_adapter()
+        assert create.call_args.kwargs["basic_auth_getter"] is not None
+
+    @pytest.mark.parametrize("value", ["", "false", "0", "no", "TRUE "])
+    def test_only_true_enables_strict(self, mocker, monkeypatch, value):
+        monkeypatch.setenv(self.ENV, value)
+        m = AdapterManager()
+        m.configure(url="https://example.com", auth_token="server-configured-token")
+        mocker.patch("astro_airflow_mcp.adapter_manager._extract_bearer_token", return_value=None)
+        if value.strip().lower() == "true":
+            with pytest.raises(MissingUserTokenError):
+                m._get_auth_token()
+        else:
+            assert m._get_auth_token() == "server-configured-token"
