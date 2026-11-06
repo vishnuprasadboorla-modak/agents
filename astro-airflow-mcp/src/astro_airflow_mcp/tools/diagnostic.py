@@ -4,6 +4,7 @@ import json
 from typing import Any
 
 from astro_airflow_mcp.constants import DEFAULT_LIMIT, DEFAULT_OFFSET
+from astro_airflow_mcp.log_utils import last_error_line, log_lines
 from astro_airflow_mcp.server import (
     _get_adapter,
     _wrap_list_response,
@@ -169,6 +170,34 @@ def explore_dag(dag_id: str) -> str:
     return json.dumps(result, indent=2)
 
 
+_MAX_ERROR_LOOKUPS = 10
+
+
+def _error_snippet(adapter: Any, dag_id: str, dag_run_id: str, task: dict[str, Any]) -> str | None:
+    """Best-effort: the last error line from a failed task's latest attempt log."""
+    tries = task.get("try_number")
+    if not isinstance(tries, int) or tries < 1:
+        return None
+    map_index = task.get("map_index")
+    for attempt in (tries, tries - 1):
+        if attempt < 1:
+            break
+        try:
+            data = adapter.get_task_logs(
+                dag_id=dag_id,
+                dag_run_id=dag_run_id,
+                task_id=task["task_id"],
+                try_number=attempt,
+                map_index=map_index if isinstance(map_index, int) else -1,
+                full_content=True,
+            )
+        except Exception:
+            return None
+        if "content" in data:
+            return last_error_line(log_lines(data["content"]))
+    return None
+
+
 @mcp.tool(annotations=read_only())
 def diagnose_dag_run(dag_id: str, dag_run_id: str) -> str:
     """Diagnose issues with a specific DAG run - get run details and failed tasks.
@@ -184,7 +213,11 @@ def diagnose_dag_run(dag_id: str, dag_run_id: str) -> str:
     Returns combined data:
     - DAG run metadata (state, start/end times, trigger type)
     - Up to 100 task instances with full details and explicit sample metadata
-    - All failed/upstream_failed tasks, including map_index, across every page
+    - summary.failed_tasks: tasks that failed on their own (root causes), across
+      every page, each with an `error` line taken from its latest attempt's log
+      (up to 10 tasks are inspected; use get_task_logs for the full traceback)
+    - summary.upstream_failed_tasks: tasks that never ran because an upstream
+      task failed (symptoms, not causes)
     - Complete counts of task states (not limited to the sample)
 
     If task retrieval fails or exceeds the pagination safety limit, returns a
@@ -211,6 +244,10 @@ def diagnose_dag_run(dag_id: str, dag_run_id: str) -> str:
     try:
         tasks_data = adapter.get_all_task_instances(dag_id, dag_run_id)
         result.update(summarize_task_instances(tasks_data["task_instances"]))
+        for task in result["summary"]["failed_tasks"][:_MAX_ERROR_LOOKUPS]:
+            error = _error_snippet(adapter, dag_id, dag_run_id, task)
+            if error:
+                task["error"] = error
     except Exception as e:
         result["task_instances"] = error_payload(e, dag_id=dag_id, dag_run_id=dag_run_id)
 
@@ -219,7 +256,7 @@ def diagnose_dag_run(dag_id: str, dag_run_id: str) -> str:
 
 @mcp.tool(annotations=read_only())
 def get_system_health() -> str:
-    """Get overall Airflow system health - import errors, warnings, and DAG stats.
+    """Get overall Airflow system health - components, import errors, warnings, DAG stats.
 
     USE THIS TOOL WHEN you need a quick health check of the Airflow system.
     Returns a consolidated view of potential issues across the entire system.
@@ -233,7 +270,9 @@ def get_system_health() -> str:
     Returns combined data:
     - Import errors (DAG files that failed to parse)
     - DAG warnings (deprecations, configuration issues)
-    - DAG statistics (run counts by state) if available
+    - Component health: metadatabase, scheduler, triggerer and DAG processor
+      status with last heartbeat (a dead scheduler makes the status unhealthy)
+    - DAG statistics: run totals by state plus DAGs with failed/running/queued runs
     - Version information
 
     Returns:
@@ -270,24 +309,94 @@ def get_system_health() -> str:
     except Exception as e:
         result["dag_warnings"] = error_payload(e)
 
+    # Component health: scheduler / triggerer / dag processor / metadatabase
+    components = _component_health(adapter, result)
+
     # Get DAG stats
     try:
-        result["dag_stats"] = adapter.get_dag_stats()
+        result["dag_stats"] = _summarize_dag_stats(adapter.get_dag_stats())
     except Exception:
         result["dag_stats"] = {"available": False, "note": "dagStats endpoint not available"}
 
-    # Calculate overall health status
+    # Calculate overall health status. Problems are listed worst-first.
     import_error_count = result.get("import_errors", {}).get("count", 0)
     warning_count = result.get("dag_warnings", {}).get("count", 0)
 
+    critical: list[str] = []
+    warnings: list[str] = []
+    for name in ("metadatabase", "scheduler", "dag_processor"):
+        if components.get(name) == "unhealthy":
+            critical.append(f"{name} is unhealthy")
+    if components.get("triggerer") == "unhealthy":
+        warnings.append("triggerer is unhealthy (matters only if you use deferrable operators)")
     if import_error_count > 0:
+        critical.append(f"{import_error_count} import error(s) detected")
+    if warning_count > 0:
+        warnings.append(f"{warning_count} DAG warning(s) detected")
+
+    if critical:
         result["overall_status"] = "unhealthy"
-        result["status_reason"] = f"{import_error_count} import error(s) detected"
-    elif warning_count > 0:
+        result["status_reason"] = "; ".join(critical + warnings)
+    elif warnings:
         result["overall_status"] = "warning"
-        result["status_reason"] = f"{warning_count} DAG warning(s) detected"
+        result["status_reason"] = "; ".join(warnings)
+    elif not components:
+        result["overall_status"] = "unknown"
+        result["status_reason"] = (
+            "No import errors or warnings, but component (scheduler) health could not be checked"
+        )
     else:
         result["overall_status"] = "healthy"
-        result["status_reason"] = "No import errors or warnings"
+        result["status_reason"] = "All components healthy; no import errors or warnings"
 
     return json.dumps(result, indent=2)
+
+
+def _component_health(adapter: Any, result: dict[str, Any]) -> dict[str, str]:
+    """Fetch component health into ``result['components']``; return name -> status."""
+    try:
+        raw = adapter.get_health()
+    except Exception as e:
+        result["components"] = error_payload(e)
+        return {}
+    components: dict[str, Any] = {}
+    statuses: dict[str, str] = {}
+    for name, info in raw.items():
+        if not isinstance(info, dict):
+            continue
+        entry = {"status": info.get("status")}
+        for key, value in info.items():
+            if key.endswith("heartbeat"):
+                entry["last_heartbeat"] = value
+        components[name] = entry
+        if info.get("status"):
+            statuses[name] = info["status"]
+    result["components"] = components
+    return statuses
+
+
+def _summarize_dag_stats(stats: dict[str, Any]) -> dict[str, Any]:
+    """Collapse per-DAG stats into totals, listing only DAGs with failed/running runs."""
+    dags = stats.get("dags")
+    if not isinstance(dags, list):
+        return stats
+    totals: dict[str, int] = {}
+    attention: list[dict[str, Any]] = []
+    for dag in dags:
+        counts = {s.get("state"): s.get("count", 0) for s in dag.get("stats", [])}
+        for state, count in counts.items():
+            totals[state] = totals.get(state, 0) + count
+        if counts.get("failed") or counts.get("running") or counts.get("queued"):
+            attention.append(
+                {"dag_id": dag.get("dag_id"), **{k: v for k, v in counts.items() if v}}
+            )
+    summary: dict[str, Any] = {
+        "dags_with_runs": len(dags),
+        "totals_by_state": totals,
+        "dags_needing_attention": attention[:50],
+    }
+    if len(attention) > 50:
+        summary["dags_needing_attention_truncated"] = True
+    if stats.get("errors"):
+        summary["errors"] = stats["errors"]
+    return summary

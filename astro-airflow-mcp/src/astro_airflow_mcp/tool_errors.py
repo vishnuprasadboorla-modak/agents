@@ -8,7 +8,7 @@ call failed and decide what to do next:
       "error": "<message>",        # always contains str(exc)
       "error_type": "NotFoundError",
       "hint": "<what to do next>", # actionable guidance for the agent
-      "retryable": true,          # True  -> a corrected retry may succeed
+      "retryable": true,          # True  -> a retry with corrected arguments may succeed
                                   # False -> auth/infra/hard block; don't spin
       "dag_id": "...",            # any identifying args echoed back
     }
@@ -59,9 +59,10 @@ def _classify_status(exc: httpx.HTTPStatusError) -> tuple[bool, str]:
             "access."
         )
     if status == 404:
-        return True, (
-            "Not found (HTTP 404). Verify the identifiers are correct — a list_* "
-            "tool (list_dags / list_dag_runs / list_tasks) can confirm valid values."
+        return False, (
+            "Not found (HTTP 404). Do not repeat the same call - the resource does "
+            "not exist. Verify the identifiers; a list_* tool (list_dags / "
+            "list_dag_runs / list_tasks) can confirm valid values."
         )
     if status == 409:
         return False, (
@@ -94,8 +95,8 @@ def _classify(exc: Exception) -> tuple[bool, str]:
             "the secret is missing) and ask them to set it."
         )
     if isinstance(exc, NotFoundError):
-        return True, (
-            "The resource was not found. Check the spelling/values of the "
+        return False, (
+            "The resource was not found. Do not repeat the same call. Check the spelling/values of the "
             "identifiers (dag_id, dag_run_id, task_id) — a list_* tool can confirm "
             "valid values."
         )

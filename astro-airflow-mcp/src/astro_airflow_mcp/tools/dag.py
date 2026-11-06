@@ -67,55 +67,139 @@ def get_dag_details(dag_id: str) -> str:
     return _get_dag_details_impl(dag_id=dag_id)
 
 
+# Fields kept per DAG in compact mode. Everything else (file tokens, parse
+# timings, timetable descriptions, ...) is dropped to keep responses small.
+_COMPACT_DAG_FIELDS = (
+    "dag_id",
+    "is_paused",
+    "is_active",
+    "is_stale",
+    "schedule_interval",
+    "timetable_summary",
+    "description",
+    "owners",
+    "has_import_errors",
+    "next_dagrun",
+    "next_dagrun_logical_date",
+    "next_dagrun_run_after",
+)
+
+
+def _compact_dag(dag: dict) -> dict:
+    """Reduce a DAG record to the fields an agent normally needs (nulls omitted)."""
+    # Null fields carry no information, so they are omitted entirely.
+    out = {k: dag[k] for k in _COMPACT_DAG_FIELDS if dag.get(k) is not None}
+    # Airflow 2 returns schedule_interval as {"__type": ..., "value": ...}
+    sched = out.get("schedule_interval")
+    if isinstance(sched, dict):
+        out["schedule_interval"] = sched.get("value", sched)
+    # Tags come back as [{"name": "x"}]; flatten to ["x"].
+    out["tags"] = [t.get("name") if isinstance(t, dict) else t for t in dag.get("tags") or []]
+    return out
+
+
 def _list_dags_impl(
     limit: int = DEFAULT_LIMIT,
     offset: int = DEFAULT_OFFSET,
+    tags: list[str] | None = None,
+    dag_id_pattern: str | None = None,
+    paused: bool | None = None,
+    only_active: bool | None = None,
+    compact: bool = True,
 ) -> str:
     """Internal implementation for listing DAGs from Airflow.
 
     Args:
         limit: Maximum number of DAGs to return (default: 100)
         offset: Offset for pagination (default: 0)
+        tags: Only DAGs having these tags
+        dag_id_pattern: Case-insensitive substring match on dag_id
+        paused: True = only paused DAGs, False = only unpaused, None = both
+        only_active: Only DAGs that are active (not stale/removed)
+        compact: Return a reduced set of fields per DAG
 
     Returns:
         JSON string containing the list of DAGs with their metadata
     """
     try:
         adapter = _get_adapter()
-        data = adapter.list_dags(limit=limit, offset=offset)
+        filters = {
+            "tags": tags or None,
+            "dag_id_pattern": dag_id_pattern or None,
+            "paused": paused,
+            "only_active": only_active,
+        }
+        data = adapter.list_dags(
+            limit=limit,
+            offset=offset,
+            **{k: v for k, v in filters.items() if v is not None},
+        )
 
         if "dags" in data:
-            return _wrap_list_response(data["dags"], "dags", data)
+            dags = [_compact_dag(d) for d in data["dags"]] if compact else data["dags"]
+            payload = json.loads(_wrap_list_response(dags, "dags", data))
+            total = payload["total_dags"]
+            if offset + len(dags) < total:
+                payload["has_more"] = True
+                payload["next_offset"] = offset + len(dags)
+            return json.dumps(payload, indent=2)
         return f"No DAGs found. Response: {data}"
     except Exception as e:
         return tool_error(e)
 
 
 @mcp.tool(annotations=read_only())
-def list_dags() -> str:
-    """Get information about all Apache Airflow DAGs (Directed Acyclic Graphs).
+def list_dags(
+    limit: int = DEFAULT_LIMIT,
+    offset: int = DEFAULT_OFFSET,
+    tags: list[str] | None = None,
+    dag_id_pattern: str | None = None,
+    paused: bool | None = None,
+    only_active: bool | None = None,
+    compact: bool = True,
+) -> str:
+    """List and search Apache Airflow DAGs (Directed Acyclic Graphs).
 
     Use this tool when the user asks about:
     - "What DAGs are available?" or "List all DAGs"
     - "Show me the workflows" or "What pipelines exist?"
-    - "Which DAGs are paused/active?"
+    - "Which DAGs are paused/active?" (use `paused`)
+    - "Find DAGs with 'etl' in the name" (use `dag_id_pattern`)
+    - "Show DAGs tagged X" (use `tags`)
     - DAG schedules, descriptions, or tags
-    - Finding a specific DAG by name
 
-    Returns comprehensive DAG metadata including:
-    - dag_id: Unique identifier for the DAG
-    - is_paused: Whether the DAG is currently paused
-    - is_active: Whether the DAG is active
-    - schedule_interval: How often the DAG runs
-    - description: Human-readable description
-    - tags: Labels/categories for the DAG
-    - owners: Who maintains the DAG
-    - file_token: Location of the DAG file
+    Results are paginated. The response has `total_dags` (all matches) and
+    `returned_count`; when more remain it also has `has_more=true` and
+    `next_offset` - call again with `offset=next_offset` to page through them.
+
+    Each DAG (compact mode, the default) contains: dag_id, is_paused,
+    is_active/is_stale, schedule, description, owners, tags, next run info and
+    has_import_errors. Use `get_dag_details` for the full record of one DAG.
+
+    Args:
+        limit: Maximum number of DAGs to return per page (default: 100).
+        offset: Number of DAGs to skip, for pagination (default: 0).
+        tags: Only return DAGs that have these tags, e.g. ["finance"].
+        dag_id_pattern: Case-insensitive substring match on the dag_id,
+                        e.g. "etl" matches "daily_etl_orders".
+        paused: true = only paused DAGs, false = only unpaused DAGs,
+                omitted = both.
+        only_active: true = skip stale/removed DAGs.
+        compact: true (default) returns a reduced set of fields per DAG to save
+                 context; false returns the full Airflow record for each DAG.
 
     Returns:
-        JSON with list of all DAGs and their complete metadata
+        JSON with a page of DAGs and pagination metadata
     """
-    return _list_dags_impl()
+    return _list_dags_impl(
+        limit=limit,
+        offset=offset,
+        tags=tags,
+        dag_id_pattern=dag_id_pattern,
+        paused=paused,
+        only_active=only_active,
+        compact=compact,
+    )
 
 
 def _get_dag_source_impl(dag_id: str) -> str:

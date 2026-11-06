@@ -100,7 +100,7 @@ class TestStructuredErrorRoundTrip:
 
         assert data["error_type"] == "NotFoundError"
         assert data["dag_id"] == "nope"
-        assert data["retryable"] is True
+        assert data["retryable"] is False
         assert data["hint"]
 
     def test_read_only_block_round_trips(self, mocker, monkeypatch):

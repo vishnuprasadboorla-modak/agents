@@ -4,7 +4,12 @@ import json
 import time
 from typing import Any
 
-from astro_airflow_mcp.constants import DEFAULT_LIMIT, DEFAULT_OFFSET, TERMINAL_DAG_RUN_STATES
+from astro_airflow_mcp.constants import (
+    ACTIVE_DAG_RUN_STATES,
+    DEFAULT_LIMIT,
+    DEFAULT_OFFSET,
+    TERMINAL_DAG_RUN_STATES,
+)
 from astro_airflow_mcp.server import (
     _get_adapter,
     _wrap_list_response,
@@ -20,6 +25,11 @@ def _list_dag_runs_impl(
     limit: int = DEFAULT_LIMIT,
     offset: int = DEFAULT_OFFSET,
     order_by: str | None = None,
+    state: list[str] | None = None,
+    start_date_gte: str | None = None,
+    start_date_lte: str | None = None,
+    end_date_gte: str | None = None,
+    end_date_lte: str | None = None,
 ) -> str:
     """Internal implementation for listing DAG runs from Airflow.
 
@@ -29,13 +39,29 @@ def _list_dag_runs_impl(
         offset: Offset for pagination (default: 0)
         order_by: Sort field; prefix with '-' for descending. ``None`` falls back
                   to the Airflow API default (``id`` ascending, i.e. oldest first).
+        state: Only runs in these states (e.g. ["failed"])
+        start_date_gte / start_date_lte: ISO-8601 bounds on the run start time
+        end_date_gte / end_date_lte: ISO-8601 bounds on the run end time
 
     Returns:
         JSON string containing the list of DAG runs with their metadata
     """
     try:
         adapter = _get_adapter()
-        data = adapter.list_dag_runs(dag_id=dag_id, limit=limit, offset=offset, order_by=order_by)
+        filters = {
+            "state": state or None,
+            "start_date_gte": start_date_gte,
+            "start_date_lte": start_date_lte,
+            "end_date_gte": end_date_gte,
+            "end_date_lte": end_date_lte,
+        }
+        data = adapter.list_dag_runs(
+            dag_id=dag_id,
+            limit=limit,
+            offset=offset,
+            order_by=order_by,
+            **{k: v for k, v in filters.items() if v is not None},
+        )
 
         if "dag_runs" in data:
             return _wrap_list_response(data["dag_runs"], "dag_runs", data)
@@ -83,12 +109,23 @@ def _trigger_dag_impl(
 
         # Check if DAG is paused and unpause if needed
         dag_details = adapter.get_dag(dag_id)
-        if dag_details.get("is_paused", False):
+        was_paused = bool(dag_details.get("is_paused", False))
+        if was_paused:
             # DAG is paused, unpause it
             adapter.unpause_dag(dag_id)
 
         # Trigger the DAG run
         data = adapter.trigger_dag_run(dag_id=dag_id, conf=conf)
+        if was_paused and isinstance(data, dict):
+            data = {
+                **data,
+                "dag_was_paused": True,
+                "warning": (
+                    f"DAG '{dag_id}' was paused and has been automatically unpaused so "
+                    "the run can execute. It will now also run on its schedule; call "
+                    "pause_dag if that is not wanted."
+                ),
+            }
         return json.dumps(data, indent=2)
     except Exception as e:
         return tool_error(e, dag_id=dag_id)
@@ -186,6 +223,11 @@ def _trigger_dag_and_wait_impl(
                 "state": current_state,
                 "timed_out": True,
                 "elapsed_seconds": round(elapsed, 2),
+                **(
+                    {"dag_was_paused": True, "warning": trigger_data.get("warning")}
+                    if trigger_data.get("dag_was_paused")
+                    else {}
+                ),
                 "message": f"Timed out after {timeout} seconds. DAG run is still {current_state}.",
             }
             return json.dumps(result, indent=2)
@@ -214,6 +256,9 @@ def _trigger_dag_and_wait_impl(
                 "timed_out": False,
                 "elapsed_seconds": round(time.time() - start_time, 2),
             }
+            if trigger_data.get("dag_was_paused"):
+                result["dag_was_paused"] = True
+                result["warning"] = trigger_data.get("warning")
 
             # Fetch failed task details if not successful
             if current_state != "success":
@@ -236,6 +281,11 @@ def list_dag_runs(
     limit: int = DEFAULT_LIMIT,
     offset: int = DEFAULT_OFFSET,
     order_by: str = "-start_date",
+    state: list[str] | None = None,
+    start_date_gte: str | None = None,
+    start_date_lte: str | None = None,
+    end_date_gte: str | None = None,
+    end_date_lte: str | None = None,
 ) -> str:
     """Get execution history and status of DAG runs (workflow executions).
 
@@ -245,7 +295,8 @@ def list_dag_runs(
     - "What's the status of my workflows?"
     - "When did DAG X last run?"
     - Execution times, durations, or states
-    - Finding runs by date or status
+    - Finding runs by date or status, e.g. "all failed runs in the last 24h"
+      (use `state` and `start_date_gte`)
 
     Returns execution metadata including:
     - dag_run_id: Unique identifier for this execution
@@ -267,6 +318,13 @@ def list_dag_runs(
                   Defaults to '-start_date' so the most recent runs are
                   returned first. The Airflow API default would be 'id'
                   ascending (oldest first), which is rarely what callers want.
+        state: Only return runs in these states, e.g. ["failed"] or
+               ["running", "queued"]. Valid: queued, running, success, failed.
+        start_date_gte: Only runs that started at/after this ISO-8601 time,
+                        e.g. "2026-11-05T00:00:00Z" (use for "last 24h").
+        start_date_lte: Only runs that started at/before this ISO-8601 time.
+        end_date_gte: Only runs that ended at/after this ISO-8601 time.
+        end_date_lte: Only runs that ended at/before this ISO-8601 time.
 
     Returns:
         JSON with list of DAG runs, sorted most-recent-first by default
@@ -276,6 +334,11 @@ def list_dag_runs(
         limit=limit,
         offset=offset,
         order_by=order_by,
+        state=state,
+        start_date_gte=start_date_gte,
+        start_date_lte=start_date_lte,
+        end_date_gte=end_date_gte,
+        end_date_lte=end_date_lte,
     )
 
 
@@ -333,6 +396,8 @@ def trigger_dag(dag_id: str, conf: dict | None = None) -> str:
 
     NOTE: This tool automatically unpauses the DAG if it is paused before triggering.
     This ensures the DAG run will execute and not get stuck in a queued state.
+    When that happens the response includes `dag_was_paused: true` and a
+    `warning`; tell the user the DAG was unpaused as a side effect.
 
     IMPORTANT: This is a write operation that modifies Airflow state by creating
     a new DAG run. Use with caution.
@@ -422,7 +487,7 @@ def trigger_dag_and_wait(
     )
 
 
-def _delete_dag_run_impl(dag_id: str, dag_run_id: str) -> str:
+def _delete_dag_run_impl(dag_id: str, dag_run_id: str, force: bool = False) -> str:
     """Internal implementation for deleting a DAG run.
 
     Fetches run details before deleting so the caller can see what was removed.
@@ -430,6 +495,7 @@ def _delete_dag_run_impl(dag_id: str, dag_run_id: str) -> str:
     Args:
         dag_id: The ID of the DAG
         dag_run_id: The ID of the DAG run to delete
+        force: Allow deleting a run that is still queued or running
 
     Returns:
         JSON string with the deleted run details
@@ -442,6 +508,28 @@ def _delete_dag_run_impl(dag_id: str, dag_run_id: str) -> str:
             run_details = adapter.get_dag_run(dag_id, dag_run_id)
         except Exception:
             run_details = None
+
+        active_state = (run_details or {}).get("state")
+        if active_state in ACTIVE_DAG_RUN_STATES and not force:
+            return json.dumps(
+                {
+                    "error": (
+                        f"DAG run '{dag_run_id}' is still {active_state}; refusing to "
+                        "delete an active run."
+                    ),
+                    "error_type": "ActiveRunError",
+                    "hint": (
+                        "Deleting an active run can orphan running tasks. Confirm with "
+                        "the user, then retry with force=true if they really want it "
+                        "deleted."
+                    ),
+                    "retryable": False,
+                    "dag_id": dag_id,
+                    "dag_run_id": dag_run_id,
+                    "state": active_state,
+                },
+                indent=2,
+            )
 
         adapter.delete_dag_run(dag_id, dag_run_id)
 
@@ -460,6 +548,7 @@ def _clear_dag_run_impl(
     dag_id: str,
     dag_run_id: str,
     dry_run: bool = True,
+    only_failed: bool = False,
 ) -> str:
     """Internal implementation for clearing a DAG run.
 
@@ -467,12 +556,25 @@ def _clear_dag_run_impl(
         dag_id: The ID of the DAG
         dag_run_id: The ID of the DAG run to clear
         dry_run: If True, return what would be cleared without clearing
+        only_failed: Only clear the failed tasks (and their downstream tasks),
+            leaving successful tasks untouched
 
     Returns:
         JSON string with the cleared (or would-be-cleared) task instances
     """
     try:
         adapter = _get_adapter()
+        if only_failed:
+            from astro_airflow_mcp.tools.task import _clear_task_instances_impl
+
+            return _clear_task_instances_impl(
+                dag_id=dag_id,
+                dag_run_id=dag_run_id,
+                task_ids=None,
+                dry_run=dry_run,
+                only_failed=True,
+                include_downstream=True,
+            )
         data = adapter.clear_dag_run(dag_id, dag_run_id, dry_run=dry_run)
         return json.dumps(data, indent=2)
     except Exception as e:
@@ -480,7 +582,7 @@ def _clear_dag_run_impl(
 
 
 @mcp.tool(annotations=write())
-def delete_dag_run(dag_id: str, dag_run_id: str) -> str:
+def delete_dag_run(dag_id: str, dag_run_id: str, force: bool = False) -> str:
     """Delete a specific DAG run permanently.
 
     Use this tool when the user asks to:
@@ -490,6 +592,9 @@ def delete_dag_run(dag_id: str, dag_run_id: str) -> str:
 
     This permanently removes the DAG run and its metadata. This cannot be undone.
 
+    A run that is still queued or running is NOT deleted unless `force=true`;
+    the call returns an `ActiveRunError` instead.
+
     IMPORTANT: This is a destructive, irreversible operation. Always confirm
     with the user before calling this tool. Show them the dag_id and dag_run_id
     you intend to delete and get explicit approval first. The response includes
@@ -498,11 +603,13 @@ def delete_dag_run(dag_id: str, dag_run_id: str) -> str:
     Args:
         dag_id: The ID of the DAG (e.g., "example_dag")
         dag_run_id: The ID of the DAG run to delete (e.g., "manual__2024-01-01T00:00:00+00:00")
+        force: Set true to delete a run that is still queued/running. Only
+               after the user explicitly confirms. Default false.
 
     Returns:
         JSON with deletion confirmation and details of the deleted run
     """
-    return _delete_dag_run_impl(dag_id=dag_id, dag_run_id=dag_run_id)
+    return _delete_dag_run_impl(dag_id=dag_id, dag_run_id=dag_run_id, force=force)
 
 
 @mcp.tool(annotations=write(destructive=True, idempotent=True))
@@ -510,6 +617,7 @@ def clear_dag_run(
     dag_id: str,
     dag_run_id: str,
     dry_run: bool = True,
+    only_failed: bool = False,
 ) -> str:
     """Clear a DAG run to allow re-execution of all its tasks.
 
@@ -522,6 +630,11 @@ def clear_dag_run(
     by the scheduler. Unlike deleting, this preserves the run but resets its state.
 
     Use dry_run=True (default) to preview what would be cleared before committing.
+    Previews are allowed even in read-only mode; only the real clear is blocked.
+
+    Use only_failed=True to retry just the failed tasks (plus their downstream
+    tasks) and keep every successful task as-is - the usual "retry the failures"
+    action. Without it, EVERY task in the run is reset, including successes.
 
     IMPORTANT: This is a write operation that modifies Airflow state by resetting
     task instances. Set dry_run=False to actually clear.
@@ -531,6 +644,8 @@ def clear_dag_run(
         dag_run_id: The ID of the DAG run to clear (e.g., "manual__2024-01-01T00:00:00+00:00")
         dry_run: If True (default), return what would be cleared without clearing.
                  Set to False to actually clear and re-execute.
+        only_failed: If True, only reset failed tasks and their downstream
+                     tasks; successful tasks are kept. Default False (reset all).
 
     Returns:
         JSON with list of task instances that were (or would be) cleared
@@ -539,4 +654,5 @@ def clear_dag_run(
         dag_id=dag_id,
         dag_run_id=dag_run_id,
         dry_run=dry_run,
+        only_failed=only_failed,
     )

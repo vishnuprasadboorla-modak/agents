@@ -3,6 +3,9 @@
 # Terminal states for DAG runs (polling stops when reached)
 TERMINAL_DAG_RUN_STATES = {"success", "failed"}
 
+# DAG run states in which a run is still in flight (deleting one needs force)
+ACTIVE_DAG_RUN_STATES = {"queued", "running"}
+
 # Task states considered as failures
 FAILED_TASK_STATES = {"failed", "upstream_failed"}
 

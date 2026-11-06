@@ -11,7 +11,7 @@ from astro_airflow_mcp.server import (
 )
 from astro_airflow_mcp.tool_annotations import read_only
 from astro_airflow_mcp.tool_errors import tool_error
-from astro_airflow_mcp.utils import filter_connection_passwords
+from astro_airflow_mcp.utils import filter_connection_passwords, redact_config
 
 
 def _list_connections_impl(
@@ -124,7 +124,10 @@ def _get_config_impl() -> str:
 
         if "sections" in data:
             # Add summary metadata and pass through sections
-            result = {"total_sections": len(data["sections"]), "sections": data["sections"]}
+            # Never return secrets in clear text, whatever Airflow's own
+            # expose_config setting allows.
+            safe = redact_config(data)
+            result = {"total_sections": len(safe["sections"]), "sections": safe["sections"]}
             return json.dumps(result, indent=2)
         return f"No configuration found. Response: {data}"
     except Exception as e:

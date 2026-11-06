@@ -61,10 +61,15 @@ def test_failures_beyond_server_clamped_pages(adapter, mocker, interface, comman
     result = invoke(interface, command)
 
     summary = result["summary"] if command == "diagnose" else result
-    assert [(task["map_index"], task["state"]) for task in summary["failed_tasks"]] == [
-        (813, "failed"),
-        (814, "upstream_failed"),
-    ]
+    expected = [(813, "failed"), (814, "upstream_failed")]
+    if command == "diagnose":
+        # diagnose separates root causes from upstream_failed symptoms
+        assert [(t["map_index"], t["state"]) for t in summary["failed_tasks"]] == expected[:1]
+        assert [(t["map_index"], t["state"]) for t in summary["upstream_failed_tasks"]] == (
+            expected[1:]
+        )
+    else:
+        assert [(t["map_index"], t["state"]) for t in summary["failed_tasks"]] == expected
     assert [call.kwargs["offset"] for call in pages.call_args_list] == list(range(0, 815, 40))
     if command == "diagnose":
         assert summary["total_tasks"] == 815
@@ -97,7 +102,8 @@ def test_diagnosis_prioritizes_failures_and_counts_unset_states(adapter, mocker,
 
     assert result["summary"]["state_counts"] == {"unknown": 2, "upstream_failed": 100, "failed": 1}
     assert result["summary"]["total_tasks"] == 103
-    assert len(result["summary"]["failed_tasks"]) == 101
+    assert len(result["summary"]["failed_tasks"]) == 1
+    assert len(result["summary"]["upstream_failed_tasks"]) == 100
     assert result["task_instances"] == [tasks[-1], *tasks[2:101]]
     assert result["task_instances_returned"] == 100
     assert result["task_instances_truncated"] is True

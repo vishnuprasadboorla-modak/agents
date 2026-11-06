@@ -341,30 +341,70 @@ class TestAirflowV3Adapter:
         )
         assert adapter.api_base_path == "/api/v2"
 
-    def test_get_dag_stats_call(self, mocker):
-        """Test V3 adapter calls dagStats endpoint."""
-        adapter = AirflowV3Adapter(
-            "http://localhost:8080",
-            "3.0.0",
-        )
+    def test_get_dag_stats_without_dag_ids_enumerates_dags(self, mocker):
+        """No dag_ids: Airflow 3.1 returns nothing for a bare call, so we list DAGs first."""
+        adapter = AirflowV3Adapter("http://localhost:8080", "3.1.0")
+        calls = []
 
-        mock_response = mocker.Mock()
-        mock_response.json.return_value = {"dags": []}
-        mock_response.status_code = 200
-        mock_response.raise_for_status = mocker.Mock()
+        def fake_call(endpoint, params=None, **kwargs):
+            calls.append((endpoint, params, kwargs))
+            if endpoint == "dags":
+                return {"dags": [{"dag_id": "a"}, {"dag_id": "b"}], "total_entries": 2}
+            assert endpoint == "dagStats"
+            return {
+                "dags": [{"dag_id": d, "stats": []} for d in params["dag_ids"]],
+                "total_entries": len(params["dag_ids"]),
+            }
 
-        mock_client = mocker.Mock()
-        mock_client.get.return_value = mock_response
-        mock_client.__enter__ = mocker.Mock(return_value=mock_client)
-        mock_client.__exit__ = mocker.Mock(return_value=False)
-
-        mocker.patch("httpx.Client", return_value=mock_client)
+        mocker.patch.object(adapter, "_call", side_effect=fake_call)
 
         result = adapter.get_dag_stats()
 
-        assert result == {"dags": []}
-        call_args = mock_client.get.call_args
-        assert "/api/v2/dagStats" in call_args[0][0]
+        assert [d["dag_id"] for d in result["dags"]] == ["a", "b"]
+        assert result["total_entries"] == 2
+        stats_calls = [c for c in calls if c[0] == "dagStats"]
+        assert len(stats_calls) == 1
+        assert stats_calls[0][1]["dag_ids"] == ["a", "b"]
+
+    def test_get_dag_stats_pages_through_all_dags_and_batches(self, mocker):
+        adapter = AirflowV3Adapter("http://localhost:8080", "3.1.0")
+        ids = [f"dag_{i}" for i in range(157)]
+        stats_batches = []
+
+        def fake_call(endpoint, params=None, **kwargs):
+            if endpoint == "dags":
+                off, lim = params["offset"], params["limit"]
+                return {"dags": [{"dag_id": i} for i in ids[off : off + lim]], "total_entries": 157}
+            stats_batches.append(list(params["dag_ids"]))
+            return {"dags": [{"dag_id": d, "stats": []} for d in params["dag_ids"]]}
+
+        mocker.patch.object(adapter, "_call", side_effect=fake_call)
+
+        result = adapter.get_dag_stats()
+
+        assert result["total_entries"] == 157
+        assert [len(b) for b in stats_batches] == [50, 50, 50, 7]
+
+    def test_get_dag_stats_batch_500_falls_back_to_per_dag(self, mocker):
+        import httpx
+
+        adapter = AirflowV3Adapter("http://localhost:8080", "3.2.0")
+
+        def fake_call(endpoint, params=None, **kwargs):
+            if endpoint == "dags":
+                return {"dags": [{"dag_id": "a"}, {"dag_id": "bad"}], "total_entries": 2}
+            ids = params["dag_ids"]
+            if isinstance(ids, list) or ids == "bad":
+                resp = httpx.Response(500, request=httpx.Request("GET", "http://x"))
+                raise httpx.HTTPStatusError("boom", request=resp.request, response=resp)
+            return {"dags": [{"dag_id": ids, "stats": []}]}
+
+        mocker.patch.object(adapter, "_call", side_effect=fake_call)
+
+        result = adapter.get_dag_stats()
+
+        assert [d["dag_id"] for d in result["dags"]] == ["a"]
+        assert result["errors"][0]["dag_id"] == "bad"
 
     def test_passthrough_params(self, mocker):
         """Test kwargs are passed through to API call."""

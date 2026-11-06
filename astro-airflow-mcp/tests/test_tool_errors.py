@@ -48,11 +48,12 @@ class TestErrorPayloadShape:
 class TestExceptionClassification:
     """Retryability is inferred from the exception type / status code."""
 
-    def test_not_found_is_retryable(self):
+    def test_not_found_is_not_retryable(self):
         payload = error_payload(NotFoundError("dags/missing"))
 
         assert payload["error_type"] == "NotFoundError"
-        assert payload["retryable"] is True
+        # A missing resource will not appear on an identical retry.
+        assert payload["retryable"] is False
 
     def test_read_only_blocks_and_preserves_substrings(self):
         # Backward-compat: callers/tests scanned the old bare string for these.
@@ -71,7 +72,7 @@ class TestExceptionClassification:
             (422, True),
             (401, False),
             (403, False),
-            (404, True),
+            (404, False),
             (409, False),
             (429, True),
             (500, False),
@@ -89,7 +90,7 @@ class TestExceptionClassification:
 
         assert payload["dag_id"] == "etl"
         assert "dag_run_id" not in payload
-        assert payload["retryable"] is True
+        assert payload["retryable"] is False
 
     def test_timeout_is_not_retryable(self):
         payload = error_payload(httpx.TimeoutException("slow"))
@@ -113,7 +114,7 @@ class TestToolError:
 
         assert data["error_type"] == "NotFoundError"
         assert data["dag_id"] == "x"
-        assert data["retryable"] is True
+        assert data["retryable"] is False
         assert data["hint"]
 
 

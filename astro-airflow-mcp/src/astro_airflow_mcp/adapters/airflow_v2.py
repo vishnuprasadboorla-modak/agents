@@ -154,9 +154,14 @@ class AirflowV2Adapter(AirflowAdapter):
         try:
             return self._call(endpoint, params=params)
         except NotFoundError:
-            return self._handle_not_found(
-                "task logs", alternative="Check if the task instance exists and has been executed"
-            )
+            return {
+                "logs_found": False,
+                "note": (
+                    "No logs found for this task instance attempt. The task may not "
+                    "have run yet, or this try_number does not exist."
+                ),
+                "alternative": "Check the task instance state and try_number with get_task_instance.",
+            }
 
     def list_assets(self, limit: int = 100, offset: int = 0, **kwargs: Any) -> dict[str, Any]:
         """List assets (called 'datasets' in Airflow 2).
@@ -307,6 +312,10 @@ class AirflowV2Adapter(AirflowAdapter):
         """List installed Airflow provider packages."""
         return self._call("providers")
 
+    def get_health(self) -> dict[str, Any]:
+        """Get component health including scheduler/triggerer/dag-processor heartbeats."""
+        return self._call("health")
+
     def get_version(self) -> dict[str, Any]:
         """Get Airflow version info."""
         return self._call("version")
@@ -369,7 +378,11 @@ class AirflowV2Adapter(AirflowAdapter):
         json_body: dict[str, Any] = {
             "dry_run": dry_run,
         }
-        return self._post(f"dags/{dag_id}/dagRuns/{dag_run_id}/clear", json_data=json_body)
+        return self._post(
+            f"dags/{dag_id}/dagRuns/{dag_run_id}/clear",
+            json_data=json_body,
+            allow_in_read_only=dry_run,
+        )
 
     def clear_task_instances(
         self,
@@ -408,7 +421,11 @@ class AirflowV2Adapter(AirflowAdapter):
         }
 
         try:
-            return self._post(f"dags/{dag_id}/clearTaskInstances", json_data=json_body)
+            return self._post(
+                f"dags/{dag_id}/clearTaskInstances",
+                json_data=json_body,
+                allow_in_read_only=dry_run,
+            )
         except NotFoundError:
             return self._handle_not_found(
                 "clearTaskInstances",

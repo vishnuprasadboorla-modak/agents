@@ -6,8 +6,18 @@ from unittest.mock import MagicMock
 import astro_airflow_mcp.tools.dag_run as dag_run_module
 import astro_airflow_mcp.tools.diagnostic as diagnostic_module
 
-
 # Helper to get the underlying function from a decorated MCP tool
+_HEALTHY = {
+    "metadatabase": {"status": "healthy"},
+    "scheduler": {"status": "healthy", "latest_scheduler_heartbeat": "2026-01-01T00:00:00Z"},
+    "triggerer": {"status": "healthy", "latest_triggerer_heartbeat": "2026-01-01T00:00:00Z"},
+    "dag_processor": {
+        "status": "healthy",
+        "latest_dag_processor_heartbeat": "2026-01-01T00:00:00Z",
+    },
+}
+
+
 def get_tool_fn(module, tool_name):
     """Get the underlying function from an MCP tool."""
     tool = getattr(module, tool_name)
@@ -102,7 +112,9 @@ class TestDiagnoseDagRun:
         assert data["summary"]["state_counts"]["success"] == 1
         assert data["summary"]["state_counts"]["failed"] == 1
         assert data["summary"]["state_counts"]["upstream_failed"] == 1
-        assert len(data["summary"]["failed_tasks"]) == 2
+        # Root causes only; upstream_failed is reported separately.
+        assert len(data["summary"]["failed_tasks"]) == 1
+        assert len(data["summary"]["upstream_failed_tasks"]) == 1
 
     def test_diagnose_dag_run_surfaces_failed_mapped_instance_beyond_first_page(self, mocker):
         """A failed mapped instance past the first page must appear in failed_tasks.
@@ -399,6 +411,7 @@ class TestGetSystemHealth:
         mock_adapter.list_import_errors.return_value = mock_import_errors
         mock_adapter.list_dag_warnings.return_value = mock_warnings
         mock_adapter.get_dag_stats.return_value = mock_stats
+        mock_adapter.get_health.return_value = _HEALTHY
 
         mocker.patch("astro_airflow_mcp.tools.diagnostic._get_adapter", return_value=mock_adapter)
 
@@ -474,6 +487,7 @@ class TestGetSystemHealth:
         mock_adapter.list_import_errors.return_value = mock_import_errors
         mock_adapter.list_dag_warnings.return_value = mock_warnings
         mock_adapter.get_dag_stats.side_effect = Exception("Endpoint not found")
+        mock_adapter.get_health.return_value = _HEALTHY
 
         mocker.patch("astro_airflow_mcp.tools.diagnostic._get_adapter", return_value=mock_adapter)
 

@@ -166,7 +166,7 @@ By default, the server connects to `http://localhost:8080` (Airflow default; als
 | `AIRFLOW_AUTH_TOKEN` | Bearer token (alternative to username/password) |
 | `AIRFLOW_VERIFY_SSL` | Set to `false` to disable SSL certificate verification |
 | `AIRFLOW_CA_CERT` | Path to custom CA certificate bundle |
-| `AF_READ_ONLY` | Set to `true` to block all write operations |
+| `AF_READ_ONLY` | Set to `true` to block all write operations. `dry_run` previews of `clear_dag_run` / `clear_task_instances` still work |
 | `ASTRO_MCP_ALLOWED_TOOLS` | Comma-separated MCP tool names to expose; unset to expose all tools |
 
 Example with auth (Claude Code):
@@ -237,7 +237,7 @@ The allowlist limits which tools a client can call. It does not restrict the arg
 |------|-------------|
 | `explore_dag` | Get comprehensive DAG info: metadata, tasks, recent runs, source code |
 | `diagnose_dag_run` | Debug a DAG run: run details, complete task-state counts and failed task instances |
-| `get_system_health` | System overview: health status, import errors, warnings, DAG stats |
+| `get_system_health` | System overview: scheduler/triggerer/DAG-processor/database health (with heartbeats), import errors, warnings, DAG stats |
 
 `diagnose_dag_run` and `af runs diagnose` paginate through task instances before
 building their summaries. `summary.total_tasks`, `summary.state_counts`, and
@@ -260,13 +260,13 @@ of a changing run.
 
 | Tool | Description |
 |------|-------------|
-| `list_dags` | Get all DAGs and their metadata |
+| `list_dags` | List/search DAGs: `limit`, `offset`, `tags`, `dag_id_pattern`, `paused`, `only_active`, `compact` (default, small output); reports `has_more` / `next_offset` |
 | `get_dag_details` | Get detailed info about a specific DAG |
 | `get_dag_source` | Get the source code of a DAG |
 | `get_dag_stats` | Get DAG run statistics (Airflow 3.x only) |
 | `list_dag_warnings` | Get DAG import warnings |
 | `list_import_errors` | Get import errors from DAG files that failed to parse |
-| `list_dag_runs` | Get DAG run history |
+| `list_dag_runs` | Get DAG run history; filter by `state` and start/end date ranges |
 | `get_dag_run` | Get specific DAG run details |
 | `trigger_dag` | Trigger a new DAG run (start a workflow execution) |
 | `trigger_dag_and_wait` | Trigger a DAG run and wait for completion |
@@ -277,7 +277,7 @@ of a changing run.
 | `list_tasks` | Get all tasks in a DAG |
 | `get_task` | Get details about a specific task |
 | `get_task_instance` | Get task instance execution details |
-| `get_task_logs` | Get logs for a specific task instance execution |
+| `get_task_logs` | Task logs for the latest attempt by default, flattened to text and limited to the last `tail_lines` (default 200) |
 | `clear_task_instances` | Clear task instances to allow re-execution |
 | `list_pools` | Get all resource pools |
 | `get_pool` | Get details about a specific pool |
@@ -289,7 +289,7 @@ of a changing run.
 | `get_upstream_asset_events` | Get asset events that triggered a specific DAG run |
 | `list_plugins` | Get installed Airflow plugins |
 | `list_providers` | Get installed provider packages |
-| `get_airflow_config` | Get Airflow configuration |
+| `get_airflow_config` | Get Airflow configuration (secrets such as `fernet_key`, `secret_key`, `jwt_secret` and URL passwords are redacted by the server, independent of Airflow's `expose_config`) |
 | `get_airflow_version` | Get Airflow version information |
 
 ### MCP Resources

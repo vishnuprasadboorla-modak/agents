@@ -317,12 +317,56 @@ class AirflowV3Adapter(AirflowAdapter):
                 if not all_results["errors"]:
                     del all_results["errors"]
                 return all_results
-            # Pass empty dag_ids to avoid 500 error
-            return self._call("dagStats", params={"dag_ids": ""})
+            return self._get_all_dag_stats()
         except NotFoundError:
             return self._handle_not_found(
                 "dagStats", alternative="Use list_dag_runs to compute statistics"
             )
+
+    # Airflow 3.1 returns an empty list for dagStats without dag_ids, and 3.2
+    # returns a 500, so enumerate the DAG ids and query them in batches.
+    _STATS_BATCH_SIZE = 50
+    _DAG_PAGE_SIZE = 100
+
+    def _all_dag_ids(self) -> list[str]:
+        """Collect every DAG id by paging through the DAG list."""
+        dag_ids: list[str] = []
+        offset = 0
+        while True:
+            page = self.list_dags(limit=self._DAG_PAGE_SIZE, offset=offset)
+            dags = page.get("dags", [])
+            dag_ids.extend(d["dag_id"] for d in dags if d.get("dag_id"))
+            offset += len(dags)
+            if not dags or offset >= page.get("total_entries", 0):
+                return dag_ids
+
+    def _get_all_dag_stats(self) -> dict[str, Any]:
+        """DAG run stats for every DAG, fetched in batches."""
+        results: dict[str, Any] = {"dags": [], "total_entries": 0}
+        errors: list[dict[str, Any]] = []
+        dag_ids = self._all_dag_ids()
+        for i in range(0, len(dag_ids), self._STATS_BATCH_SIZE):
+            batch = dag_ids[i : i + self._STATS_BATCH_SIZE]
+            try:
+                chunk = self._call("dagStats", params={"dag_ids": batch})
+                results["dags"].extend(chunk.get("dags", []))
+                continue
+            except NotFoundError:
+                raise
+            except httpx.HTTPStatusError:
+                pass  # fall back to one DAG at a time for this batch
+            for dag_id in batch:
+                try:
+                    chunk = self._call("dagStats", params={"dag_ids": dag_id})
+                    results["dags"].extend(chunk.get("dags", []))
+                except NotFoundError:
+                    raise
+                except Exception as e:
+                    errors.append({"dag_id": dag_id, "error": str(e)})
+        results["total_entries"] = len(results["dags"])
+        if errors:
+            results["errors"] = errors
+        return results
 
     def list_dag_warnings(self, limit: int = 100, offset: int = 0) -> dict[str, Any]:
         """List DAG warnings."""
@@ -339,6 +383,10 @@ class AirflowV3Adapter(AirflowAdapter):
     def list_providers(self) -> dict[str, Any]:
         """List installed Airflow provider packages."""
         return self._call("providers")
+
+    def get_health(self) -> dict[str, Any]:
+        """Get component health including scheduler/triggerer/dag-processor heartbeats."""
+        return self._call("monitor/health")
 
     def get_version(self) -> dict[str, Any]:
         """Get Airflow version info."""
@@ -410,9 +458,14 @@ class AirflowV3Adapter(AirflowAdapter):
         try:
             return self._call(endpoint, params=params)
         except NotFoundError:
-            return self._handle_not_found(
-                "task logs", alternative="Check if the task instance exists and has been executed"
-            )
+            return {
+                "logs_found": False,
+                "note": (
+                    "No logs found for this task instance attempt. The task may not "
+                    "have run yet, or this try_number does not exist."
+                ),
+                "alternative": "Check the task instance state and try_number with get_task_instance.",
+            }
 
     def delete_dag_run(self, dag_id: str, dag_run_id: str) -> dict[str, Any]:
         """Delete a specific DAG run.
@@ -445,7 +498,11 @@ class AirflowV3Adapter(AirflowAdapter):
         json_body: dict[str, Any] = {
             "dry_run": dry_run,
         }
-        return self._post(f"dags/{dag_id}/dagRuns/{dag_run_id}/clear", json_data=json_body)
+        return self._post(
+            f"dags/{dag_id}/dagRuns/{dag_run_id}/clear",
+            json_data=json_body,
+            allow_in_read_only=dry_run is True,
+        )
 
     def clear_task_instances(
         self,
@@ -486,7 +543,11 @@ class AirflowV3Adapter(AirflowAdapter):
         }
 
         try:
-            return self._post(f"dags/{dag_id}/clearTaskInstances", json_data=json_body)
+            return self._post(
+                f"dags/{dag_id}/clearTaskInstances",
+                json_data=json_body,
+                allow_in_read_only=dry_run is True,
+            )
         except NotFoundError:
             return self._handle_not_found(
                 "clearTaskInstances",

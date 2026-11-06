@@ -148,12 +148,17 @@ class AirflowAdapter(ABC):
         self,
         endpoint: str,
         json_data: dict[str, Any] | None = None,
+        *,
+        allow_in_read_only: bool = False,
     ) -> dict[str, Any]:
         """Make HTTP POST call to Airflow API.
 
         Args:
             endpoint: API endpoint path (without base path)
             json_data: JSON body to send
+            allow_in_read_only: Skip the read-only guard. Only for POSTs that the
+                caller guarantees are side-effect free (e.g. ``dry_run=True``
+                previews, where the body is built by the server itself).
 
         Returns:
             Parsed JSON response
@@ -163,7 +168,8 @@ class AirflowAdapter(ABC):
             ReadOnlyError: If AF_READ_ONLY is set
             Exception: For other HTTP errors
         """
-        _assert_writable(f"POST {endpoint}")
+        if not allow_in_read_only:
+            _assert_writable(f"POST {endpoint}")
         headers, auth = self._setup_auth()
         headers["Accept"] = "application/json"
         headers["Content-Type"] = "application/json"
@@ -598,6 +604,10 @@ class AirflowAdapter(ABC):
         """List installed Airflow provider packages."""
 
     # System Operations
+    @abstractmethod
+    def get_health(self) -> dict[str, Any]:
+        """Get component health (metadatabase, scheduler, triggerer, dag processor)."""
+
     @abstractmethod
     def get_version(self) -> dict[str, Any]:
         """Get Airflow version info."""
